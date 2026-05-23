@@ -9,7 +9,9 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "password";
 const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || "";
 const SESSION_SECRET = process.env.SESSION_SECRET || "dev-session-secret-change-me";
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
-const DATA_DIR = path.join(__dirname, "data");
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(__dirname, "data");
 const STORE_PATH = path.join(DATA_DIR, "store.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const MAX_BODY_BYTES = 32 * 1024;
