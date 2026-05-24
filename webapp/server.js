@@ -24,6 +24,8 @@ const MYSQL_DATABASE = process.env.MYSQL_DATABASE || "";
 const MYSQL_USER = process.env.MYSQL_USER || "";
 const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || "";
 const MYSQL_SSL = process.env.MYSQL_SSL === "true";
+const MYSQL_CA_CERT = process.env.MYSQL_CA_CERT || "";
+const MYSQL_SSL_REJECT_UNAUTHORIZED = process.env.MYSQL_SSL_REJECT_UNAUTHORIZED !== "false";
 const MYSQL_URL = process.env.MYSQL_URL || (
   (process.env.DATABASE_URL || "").startsWith("mysql") ? process.env.DATABASE_URL : ""
 );
@@ -185,10 +187,21 @@ async function initMysqlStorage() {
     namedPlaceholders: true,
     timezone: "Z",
     charset: "utf8mb4",
-    ...(MYSQL_SSL ? { ssl: { rejectUnauthorized: true } } : {})
+    ...(MYSQL_SSL ? { ssl: getMysqlSslOptions(mysqlOptions.ssl) } : {})
   });
   await ensureMysqlSchema();
   console.log("Using MySQL storage.");
+}
+
+function getMysqlSslOptions(existingSsl) {
+  const ssl = typeof existingSsl === "object" && existingSsl ? { ...existingSsl } : {};
+  ssl.rejectUnauthorized = MYSQL_SSL_REJECT_UNAUTHORIZED;
+  if (MYSQL_CA_CERT) {
+    ssl.ca = MYSQL_CA_CERT.includes("-----BEGIN CERTIFICATE-----")
+      ? MYSQL_CA_CERT
+      : Buffer.from(MYSQL_CA_CERT, "base64").toString("utf8");
+  }
+  return ssl;
 }
 
 function parseMysqlUrl(value) {
