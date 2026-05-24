@@ -6,6 +6,10 @@
   "scripts": {
     "start": "node server.js"
   },
+  "dependencies": {
+    "mysql2": "^3.11.5",
+    "oracledb": "^6.10.0"
+  },
   "engines": {
     "node": ">=18"
   },

@@ -14,6 +14,19 @@ const DATA_DIR = process.env.DATA_DIR
   : path.join(__dirname, "data");
 const STORE_PATH = path.join(DATA_DIR, "store.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
+const DATABASE_PROVIDER = (process.env.DATABASE_PROVIDER || "").toLowerCase();
+const ORACLE_USER = process.env.ORACLE_USER || "";
+const ORACLE_PASSWORD = process.env.ORACLE_PASSWORD || "";
+const ORACLE_CONNECT_STRING = process.env.ORACLE_CONNECT_STRING || "";
+const MYSQL_HOST = process.env.MYSQL_HOST || "";
+const MYSQL_PORT = Number(process.env.MYSQL_PORT || 3306);
+const MYSQL_DATABASE = process.env.MYSQL_DATABASE || "";
+const MYSQL_USER = process.env.MYSQL_USER || "";
+const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || "";
+const MYSQL_SSL = process.env.MYSQL_SSL === "true";
+const MYSQL_URL = process.env.MYSQL_URL || (
+  (process.env.DATABASE_URL || "").startsWith("mysql") ? process.env.DATABASE_URL : ""
+);
 const MAX_BODY_BYTES = 32 * 1024;
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 8;
 const SESSION_MAX_AGE_MS = SESSION_MAX_AGE_SECONDS * 1000;
@@ -37,6 +50,17 @@ const MIME_TYPES = {
 };
 
 const rateLimitBuckets = new Map();
+let oraclePool = null;
+let oracledb = null;
+let mysqlPool = null;
+
+function shouldUseOracle() {
+  return DATABASE_PROVIDER === "oracle" || Boolean(ORACLE_USER && ORACLE_PASSWORD && ORACLE_CONNECT_STRING);
+}
+
+function shouldUseMysql() {
+  return DATABASE_PROVIDER === "mysql" || Boolean(MYSQL_URL) || Boolean(MYSQL_HOST && MYSQL_DATABASE && MYSQL_USER);
+}
 
 function securityHeaders() {
   return {
@@ -105,6 +129,406 @@ function readStore() {
 function writeStore(store) {
   ensureStore();
   fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
+}
+
+async function initStorage() {
+  if (shouldUseMysql()) {
+    await initMysqlStorage();
+    return;
+  }
+
+  if (!shouldUseOracle()) {
+    ensureStore();
+    console.log(`Using local JSON storage at ${STORE_PATH}`);
+    return;
+  }
+
+  if (!ORACLE_USER || !ORACLE_PASSWORD || !ORACLE_CONNECT_STRING) {
+    throw new Error("Oracle storage requires ORACLE_USER, ORACLE_PASSWORD, and ORACLE_CONNECT_STRING.");
+  }
+
+  oracledb = require("oracledb");
+  oracledb.fetchAsString = [oracledb.CLOB];
+  oraclePool = await oracledb.createPool({
+    user: ORACLE_USER,
+    password: ORACLE_PASSWORD,
+    connectString: ORACLE_CONNECT_STRING,
+    poolMin: 0,
+    poolMax: Number(process.env.ORACLE_POOL_MAX || 4),
+    poolIncrement: 1
+  });
+  await ensureOracleSchema();
+  console.log("Using Oracle Database storage.");
+}
+
+async function initMysqlStorage() {
+  if (!MYSQL_HOST || !MYSQL_DATABASE || !MYSQL_USER) {
+    if (!MYSQL_URL) {
+      throw new Error("MySQL storage requires MYSQL_URL or MYSQL_HOST, MYSQL_DATABASE, and MYSQL_USER.");
+    }
+  }
+
+  const mysql = require("mysql2/promise");
+  const mysqlOptions = MYSQL_URL
+    ? parseMysqlUrl(MYSQL_URL)
+    : {
+        host: MYSQL_HOST,
+        port: MYSQL_PORT,
+        database: MYSQL_DATABASE,
+        user: MYSQL_USER,
+        password: MYSQL_PASSWORD
+      };
+  mysqlPool = mysql.createPool({
+    ...mysqlOptions,
+    waitForConnections: true,
+    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT || 5),
+    namedPlaceholders: true,
+    timezone: "Z",
+    charset: "utf8mb4",
+    ...(MYSQL_SSL ? { ssl: { rejectUnauthorized: true } } : {})
+  });
+  await ensureMysqlSchema();
+  console.log("Using MySQL storage.");
+}
+
+function parseMysqlUrl(value) {
+  const url = new URL(value);
+  return {
+    host: url.hostname,
+    port: Number(url.port || 3306),
+    database: decodeURIComponent(url.pathname.replace(/^\//, "")),
+    user: decodeURIComponent(url.username),
+    password: decodeURIComponent(url.password),
+    ssl: url.searchParams.get("ssl") === "true" ? { rejectUnauthorized: true } : undefined
+  };
+}
+
+async function ensureMysqlSchema() {
+  await mysqlPool.execute(`
+    CREATE TABLE IF NOT EXISTS job_companies (
+      id VARCHAR(36) PRIMARY KEY,
+      name VARCHAR(120) NOT NULL,
+      status VARCHAR(40) NOT NULL,
+      memo TEXT,
+      created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  await mysqlPool.execute(`
+    CREATE TABLE IF NOT EXISTS job_comments (
+      id VARCHAR(36) PRIMARY KEY,
+      company_id VARCHAR(36) NOT NULL,
+      author VARCHAR(80) NOT NULL,
+      body TEXT NOT NULL,
+      created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      INDEX job_comments_company_idx (company_id),
+      CONSTRAINT job_comments_company_fk
+        FOREIGN KEY (company_id) REFERENCES job_companies(id)
+        ON DELETE CASCADE
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+}
+
+async function withOracleConnection(callback) {
+  const connection = await oraclePool.getConnection();
+  try {
+    return await callback(connection);
+  } finally {
+    await connection.close();
+  }
+}
+
+async function runOracleDdl(connection, sql) {
+  try {
+    await connection.execute(sql);
+  } catch (error) {
+    if (error.errorNum !== 955) throw error;
+  }
+}
+
+async function ensureOracleSchema() {
+  await withOracleConnection(async (connection) => {
+    await runOracleDdl(
+      connection,
+      `CREATE TABLE job_companies (
+        id VARCHAR2(36) PRIMARY KEY,
+        name VARCHAR2(120) NOT NULL,
+        status VARCHAR2(40) NOT NULL,
+        memo CLOB,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+      )`
+    );
+    await runOracleDdl(
+      connection,
+      `CREATE TABLE job_comments (
+        id VARCHAR2(36) PRIMARY KEY,
+        company_id VARCHAR2(36) NOT NULL,
+        author VARCHAR2(80) NOT NULL,
+        body CLOB NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        CONSTRAINT job_comments_company_fk
+          FOREIGN KEY (company_id) REFERENCES job_companies(id)
+          ON DELETE CASCADE
+      )`
+    );
+    await runOracleDdl(connection, "CREATE INDEX job_comments_company_idx ON job_comments(company_id)");
+  });
+}
+
+function normalizeDate(value) {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
+
+function rowToCompany(row) {
+  return {
+    id: row.ID,
+    name: row.NAME,
+    status: row.STATUS,
+    memo: row.MEMO || "",
+    createdAt: normalizeDate(row.CREATED_AT),
+    updatedAt: normalizeDate(row.UPDATED_AT),
+    comments: []
+  };
+}
+
+function rowToComment(row) {
+  return {
+    id: row.ID,
+    author: row.AUTHOR,
+    body: row.BODY || "",
+    createdAt: normalizeDate(row.CREATED_AT)
+  };
+}
+
+function mysqlRowToCompany(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    status: row.status,
+    memo: row.memo || "",
+    createdAt: normalizeDate(row.created_at),
+    updatedAt: normalizeDate(row.updated_at),
+    comments: []
+  };
+}
+
+function mysqlRowToComment(row) {
+  return {
+    id: row.id,
+    author: row.author,
+    body: row.body || "",
+    createdAt: normalizeDate(row.created_at)
+  };
+}
+
+async function listCompanies() {
+  if (shouldUseMysql()) {
+    const [companyRows] = await mysqlPool.execute(
+      `SELECT id, name, status, memo, created_at, updated_at
+       FROM job_companies
+       ORDER BY created_at DESC`
+    );
+    const [commentRows] = await mysqlPool.execute(
+      `SELECT id, company_id, author, body, created_at
+       FROM job_comments
+       ORDER BY created_at DESC`
+    );
+    const companies = companyRows.map(mysqlRowToCompany);
+    const companiesById = new Map(companies.map((company) => [company.id, company]));
+    commentRows.forEach((row) => {
+      const company = companiesById.get(row.company_id);
+      if (company) company.comments.push(mysqlRowToComment(row));
+    });
+    return companies.map(safeCompany);
+  }
+
+  if (!shouldUseOracle()) {
+    return readStore().companies.map(safeCompany);
+  }
+
+  return withOracleConnection(async (connection) => {
+    const companyResult = await connection.execute(
+      `SELECT id, name, status, memo, created_at, updated_at
+       FROM job_companies
+       ORDER BY created_at DESC`,
+      {},
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    const commentResult = await connection.execute(
+      `SELECT id, company_id, author, body, created_at
+       FROM job_comments
+       ORDER BY created_at DESC`,
+      {},
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    const companies = companyResult.rows.map(rowToCompany);
+    const companiesById = new Map(companies.map((company) => [company.id, company]));
+    commentResult.rows.forEach((row) => {
+      const company = companiesById.get(row.COMPANY_ID);
+      if (company) company.comments.push(rowToComment(row));
+    });
+    return companies.map(safeCompany);
+  });
+}
+
+async function createCompany({ name, status, memo }) {
+  const now = new Date().toISOString();
+  const company = {
+    id: crypto.randomUUID(),
+    name,
+    status,
+    memo,
+    createdAt: now,
+    updatedAt: now,
+    comments: []
+  };
+
+  if (shouldUseMysql()) {
+    await mysqlPool.execute(
+      `INSERT INTO job_companies (id, name, status, memo)
+       VALUES (:id, :name, :status, :memo)`,
+      { id: company.id, name, status, memo }
+    );
+    return safeCompany(company);
+  }
+
+  if (!shouldUseOracle()) {
+    const store = readStore();
+    store.companies.unshift(company);
+    writeStore(store);
+    return safeCompany(company);
+  }
+
+  await withOracleConnection(async (connection) => {
+    await connection.execute(
+      `INSERT INTO job_companies (id, name, status, memo, created_at, updated_at)
+       VALUES (:id, :name, :status, :memo, SYSTIMESTAMP, SYSTIMESTAMP)`,
+      { id: company.id, name, status, memo },
+      { autoCommit: true }
+    );
+  });
+  return safeCompany(company);
+}
+
+async function updateCompany(id, { name, status, memo }) {
+  const now = new Date().toISOString();
+
+  if (shouldUseMysql()) {
+    const [result] = await mysqlPool.execute(
+      `UPDATE job_companies
+       SET name = :name,
+           status = :status,
+           memo = :memo
+       WHERE id = :id`,
+      { id, name, status, memo }
+    );
+    if (result.affectedRows === 0) return null;
+    return (await findCompany(id)) || { id, name, status, memo, createdAt: now, updatedAt: now, comments: [] };
+  }
+
+  if (!shouldUseOracle()) {
+    const store = readStore();
+    const company = store.companies.find((item) => item.id === id);
+    if (!company) return null;
+    company.name = name;
+    company.status = status;
+    company.memo = memo;
+    company.updatedAt = now;
+    writeStore(store);
+    return safeCompany(company);
+  }
+
+  return withOracleConnection(async (connection) => {
+    const result = await connection.execute(
+      `UPDATE job_companies
+       SET name = :name,
+           status = :status,
+           memo = :memo,
+           updated_at = SYSTIMESTAMP
+       WHERE id = :id`,
+      { id, name, status, memo },
+      { autoCommit: true }
+    );
+    if (result.rowsAffected === 0) return null;
+    return (await findCompany(id)) || { id, name, status, memo, createdAt: now, updatedAt: now, comments: [] };
+  });
+}
+
+async function deleteCompany(id) {
+  if (shouldUseMysql()) {
+    const [result] = await mysqlPool.execute("DELETE FROM job_companies WHERE id = :id", { id });
+    return result.affectedRows > 0;
+  }
+
+  if (!shouldUseOracle()) {
+    const store = readStore();
+    const before = store.companies.length;
+    store.companies = store.companies.filter((item) => item.id !== id);
+    if (store.companies.length === before) return false;
+    writeStore(store);
+    return true;
+  }
+
+  return withOracleConnection(async (connection) => {
+    const result = await connection.execute(
+      "DELETE FROM job_companies WHERE id = :id",
+      { id },
+      { autoCommit: true }
+    );
+    return result.rowsAffected > 0;
+  });
+}
+
+async function findCompany(id) {
+  return (await listCompanies()).find((company) => company.id === id) || null;
+}
+
+async function createComment(companyId, { author, body }) {
+  const comment = {
+    id: crypto.randomUUID(),
+    author,
+    body,
+    createdAt: new Date().toISOString()
+  };
+
+  if (shouldUseMysql()) {
+    const [companyRows] = await mysqlPool.execute("SELECT id FROM job_companies WHERE id = :companyId", { companyId });
+    if (companyRows.length === 0) return null;
+
+    await mysqlPool.execute(
+      `INSERT INTO job_comments (id, company_id, author, body)
+       VALUES (:id, :companyId, :author, :body)`,
+      { ...comment, companyId }
+    );
+    return comment;
+  }
+
+  if (!shouldUseOracle()) {
+    const store = readStore();
+    const company = store.companies.find((item) => item.id === companyId);
+    if (!company) return null;
+    company.comments = company.comments || [];
+    company.comments.unshift(comment);
+    writeStore(store);
+    return comment;
+  }
+
+  return withOracleConnection(async (connection) => {
+    const companyResult = await connection.execute(
+      "SELECT id FROM job_companies WHERE id = :companyId",
+      { companyId }
+    );
+    if (companyResult.rows.length === 0) return null;
+
+    await connection.execute(
+      `INSERT INTO job_comments (id, company_id, author, body, created_at)
+       VALUES (:id, :companyId, :author, :body, SYSTIMESTAMP)`,
+      { ...comment, companyId },
+      { autoCommit: true }
+    );
+    return comment;
+  });
 }
 
 function sendJson(res, statusCode, payload) {
@@ -416,10 +840,9 @@ async function handleApi(req, res) {
   }
 
   if (method === "GET" && url.pathname === "/api/companies") {
-    const store = readStore();
     sendJson(res, 200, {
       statuses: STATUSES,
-      companies: store.companies.map(safeCompany)
+      companies: await listCompanies()
     });
     return;
   }
@@ -444,20 +867,12 @@ async function handleApi(req, res) {
       return;
     }
 
-    const now = new Date().toISOString();
-    const store = readStore();
-    const company = {
-      id: crypto.randomUUID(),
+    const company = await createCompany({
       name,
       status,
-      memo,
-      createdAt: now,
-      updatedAt: now,
-      comments: []
-    };
-    store.companies.unshift(company);
-    writeStore(store);
-    sendJson(res, 201, { company: safeCompany(company) });
+      memo
+    });
+    sendJson(res, 201, { company });
     return;
   }
 
@@ -473,25 +888,23 @@ async function handleApi(req, res) {
     }
 
     const body = await collectBody(req);
-    const store = readStore();
-    const company = store.companies.find((item) => item.id === companyMatch[1]);
-    if (!company) {
-      sendError(res, 404, "会社が見つかりません。");
-      return;
-    }
-
     const name = cleanText(body.name, 120);
     if (!name) {
       sendError(res, 400, "会社名を入力してください。");
       return;
     }
 
-    company.name = name;
-    company.status = STATUSES.includes(body.status) ? body.status : company.status;
-    company.memo = cleanText(body.memo, 500);
-    company.updatedAt = new Date().toISOString();
-    writeStore(store);
-    sendJson(res, 200, { company: safeCompany(company) });
+    const existing = await findCompany(companyMatch[1]);
+    const company = await updateCompany(companyMatch[1], {
+      name,
+      status: STATUSES.includes(body.status) ? body.status : existing?.status || STATUSES[0],
+      memo: cleanText(body.memo, 500)
+    });
+    if (!company) {
+      sendError(res, 404, "会社が見つかりません。");
+      return;
+    }
+    sendJson(res, 200, { company });
     return;
   }
 
@@ -505,14 +918,10 @@ async function handleApi(req, res) {
       return;
     }
 
-    const store = readStore();
-    const before = store.companies.length;
-    store.companies = store.companies.filter((item) => item.id !== companyMatch[1]);
-    if (store.companies.length === before) {
+    if (!(await deleteCompany(companyMatch[1]))) {
       sendError(res, 404, "会社が見つかりません。");
       return;
     }
-    writeStore(store);
     sendJson(res, 200, { ok: true });
     return;
   }
@@ -536,22 +945,14 @@ async function handleApi(req, res) {
       return;
     }
 
-    const store = readStore();
-    const company = store.companies.find((item) => item.id === commentMatch[1]);
-    if (!company) {
+    const comment = await createComment(commentMatch[1], {
+      author,
+      body: commentBody
+    });
+    if (!comment) {
       sendError(res, 404, "会社が見つかりません。");
       return;
     }
-
-    const comment = {
-      id: crypto.randomUUID(),
-      author,
-      body: commentBody,
-      createdAt: new Date().toISOString()
-    };
-    company.comments = company.comments || [];
-    company.comments.unshift(comment);
-    writeStore(store);
     sendJson(res, 201, { comment });
     return;
   }
@@ -578,10 +979,16 @@ const server = http.createServer((req, res) => {
   serveStatic(req, res);
 });
 
-ensureStore();
-server.listen(PORT, () => {
-  console.log(`Job hunt progress app running at http://localhost:${PORT}`);
-  if (!process.env.ADMIN_PASSWORD) {
-    console.log("Using default admin password. Set ADMIN_PASSWORD before publishing.");
-  }
-});
+initStorage()
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log(`Job hunt progress app running at http://localhost:${PORT}`);
+      if (!process.env.ADMIN_PASSWORD && !process.env.ADMIN_PASSWORD_HASH) {
+        console.log("Using default admin password. Set ADMIN_PASSWORD_HASH before publishing.");
+      }
+    });
+  })
+  .catch((error) => {
+    console.error("Failed to initialize storage:", error);
+    process.exit(1);
+  });
