@@ -68,6 +68,14 @@
             会社URL
             <input name="url" placeholder="example.com/recruit" />
           </label>
+          <label>
+            期限日
+            <input name="dueDate" type="date" />
+          </label>
+          <label class="wide-field">
+            会社ごとのやること
+            <input name="actionItem" placeholder="例: OB・OG訪問を依頼する" />
+          </label>
           <label class="wide-field">
             メモ
             <textarea name="memo" rows="3" placeholder="次回面接日、準備事項など"></textarea>
@@ -118,6 +126,7 @@
             <button class="icon-button delete-button" type="button" title="削除">削除</button>
           </div>
         </div>
+        <dl class="company-details"></dl>
         <p class="memo"></p>
         <div class="edit-area hidden">
           <label>
@@ -135,6 +144,14 @@
           <label>
             会社URL
             <input class="edit-url" placeholder="example.com/recruit" />
+          </label>
+          <label>
+            期限日
+            <input class="edit-due-date" type="date" />
+          </label>
+          <label>
+            会社ごとのやること
+            <input class="edit-action-item" placeholder="例: OB・OG訪問を依頼する" />
           </label>
           <label>
             メモ

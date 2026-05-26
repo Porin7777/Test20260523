@@ -117,6 +117,8 @@ function ensureStore() {
           status: "エントリー済み",
           desireLevel: "未設定",
           url: "",
+          dueDate: "",
+          actionItem: "",
           memo: "求人内容と応募書類を確認中",
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -229,6 +231,8 @@ async function ensureMysqlSchema() {
       status VARCHAR(40) NOT NULL,
       desire_level VARCHAR(40) NOT NULL DEFAULT '未設定',
       company_url VARCHAR(500),
+      company_due_date DATE,
+      action_item VARCHAR(500),
       memo TEXT,
       created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
       updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
@@ -267,6 +271,8 @@ async function ensureMysqlSchema() {
   `);
   await runMysqlMigration("ALTER TABLE job_companies ADD COLUMN desire_level VARCHAR(40) NOT NULL DEFAULT '未設定'");
   await runMysqlMigration("ALTER TABLE job_companies ADD COLUMN company_url VARCHAR(500)");
+  await runMysqlMigration("ALTER TABLE job_companies ADD COLUMN company_due_date DATE");
+  await runMysqlMigration("ALTER TABLE job_companies ADD COLUMN action_item VARCHAR(500)");
 }
 
 async function runMysqlMigration(sql) {
@@ -304,6 +310,8 @@ async function ensureOracleSchema() {
         status VARCHAR2(40) NOT NULL,
         desire_level VARCHAR2(40) DEFAULT '未設定' NOT NULL,
         company_url VARCHAR2(500),
+        company_due_date DATE,
+        action_item VARCHAR2(500),
         memo CLOB,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL,
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL
@@ -325,6 +333,8 @@ async function ensureOracleSchema() {
     await runOracleDdl(connection, "CREATE INDEX job_comments_company_idx ON job_comments(company_id)");
     await runOracleDdl(connection, "ALTER TABLE job_companies ADD desire_level VARCHAR2(40) DEFAULT '未設定' NOT NULL");
     await runOracleDdl(connection, "ALTER TABLE job_companies ADD company_url VARCHAR2(500)");
+    await runOracleDdl(connection, "ALTER TABLE job_companies ADD company_due_date DATE");
+    await runOracleDdl(connection, "ALTER TABLE job_companies ADD action_item VARCHAR2(500)");
     await runOracleDdl(
       connection,
       `CREATE TABLE job_todos (
@@ -359,6 +369,8 @@ function rowToCompany(row) {
     status: row.STATUS,
     desireLevel: row.DESIRE_LEVEL || "未設定",
     url: row.COMPANY_URL || "",
+    dueDate: dateOnly(row.COMPANY_DUE_DATE),
+    actionItem: row.ACTION_ITEM || "",
     memo: row.MEMO || "",
     createdAt: normalizeDate(row.CREATED_AT),
     updatedAt: normalizeDate(row.UPDATED_AT),
@@ -382,6 +394,8 @@ function mysqlRowToCompany(row) {
     status: row.status,
     desireLevel: row.desire_level || "未設定",
     url: row.company_url || "",
+    dueDate: dateOnly(row.company_due_date),
+    actionItem: row.action_item || "",
     memo: row.memo || "",
     createdAt: normalizeDate(row.created_at),
     updatedAt: normalizeDate(row.updated_at),
@@ -666,7 +680,7 @@ async function deleteFreeComment(commentId) {
 async function listCompanies() {
   if (shouldUseMysql()) {
     const [companyRows] = await mysqlPool.execute(
-      `SELECT id, name, status, desire_level, company_url, memo, created_at, updated_at
+      `SELECT id, name, status, desire_level, company_url, company_due_date, action_item, memo, created_at, updated_at
        FROM job_companies
        ORDER BY created_at DESC`
     );
@@ -680,7 +694,7 @@ async function listCompanies() {
 
   return withOracleConnection(async (connection) => {
     const companyResult = await connection.execute(
-      `SELECT id, name, status, desire_level, company_url, memo, created_at, updated_at
+      `SELECT id, name, status, desire_level, company_url, company_due_date, action_item, memo, created_at, updated_at
        FROM job_companies
        ORDER BY created_at DESC`,
       {},
@@ -691,7 +705,7 @@ async function listCompanies() {
   });
 }
 
-async function createCompany({ name, status, desireLevel, url, memo }) {
+async function createCompany({ name, status, desireLevel, url, dueDate, actionItem, memo }) {
   const now = new Date().toISOString();
   const company = {
     id: crypto.randomUUID(),
@@ -699,6 +713,8 @@ async function createCompany({ name, status, desireLevel, url, memo }) {
     status,
     desireLevel,
     url,
+    dueDate,
+    actionItem,
     memo,
     createdAt: now,
     updatedAt: now,
@@ -707,9 +723,9 @@ async function createCompany({ name, status, desireLevel, url, memo }) {
 
   if (shouldUseMysql()) {
     await mysqlPool.execute(
-      `INSERT INTO job_companies (id, name, status, desire_level, company_url, memo)
-       VALUES (:id, :name, :status, :desireLevel, :url, :memo)`,
-      { id: company.id, name, status, desireLevel, url, memo }
+      `INSERT INTO job_companies (id, name, status, desire_level, company_url, company_due_date, action_item, memo)
+       VALUES (:id, :name, :status, :desireLevel, :url, :dueDate, :actionItem, :memo)`,
+      { id: company.id, name, status, desireLevel, url, dueDate: dueDate || null, actionItem, memo }
     );
     return safeCompany(company);
   }
@@ -723,16 +739,16 @@ async function createCompany({ name, status, desireLevel, url, memo }) {
 
   await withOracleConnection(async (connection) => {
     await connection.execute(
-      `INSERT INTO job_companies (id, name, status, desire_level, company_url, memo, created_at, updated_at)
-       VALUES (:id, :name, :status, :desireLevel, :url, :memo, SYSTIMESTAMP, SYSTIMESTAMP)`,
-      { id: company.id, name, status, desireLevel, url, memo },
+      `INSERT INTO job_companies (id, name, status, desire_level, company_url, company_due_date, action_item, memo, created_at, updated_at)
+       VALUES (:id, :name, :status, :desireLevel, :url, TO_DATE(:dueDate, 'YYYY-MM-DD'), :actionItem, :memo, SYSTIMESTAMP, SYSTIMESTAMP)`,
+      { id: company.id, name, status, desireLevel, url, dueDate: dueDate || null, actionItem, memo },
       { autoCommit: true }
     );
   });
   return safeCompany(company);
 }
 
-async function updateCompany(id, { name, status, desireLevel, url, memo }) {
+async function updateCompany(id, { name, status, desireLevel, url, dueDate, actionItem, memo }) {
   const now = new Date().toISOString();
 
   if (shouldUseMysql()) {
@@ -742,12 +758,14 @@ async function updateCompany(id, { name, status, desireLevel, url, memo }) {
            status = :status,
            desire_level = :desireLevel,
            company_url = :url,
+           company_due_date = :dueDate,
+           action_item = :actionItem,
            memo = :memo
        WHERE id = :id`,
-      { id, name, status, desireLevel, url, memo }
+      { id, name, status, desireLevel, url, dueDate: dueDate || null, actionItem, memo }
     );
     if (result.affectedRows === 0) return null;
-    return (await findCompany(id)) || { id, name, status, desireLevel, url, memo, createdAt: now, updatedAt: now, comments: [] };
+    return (await findCompany(id)) || { id, name, status, desireLevel, url, dueDate, actionItem, memo, createdAt: now, updatedAt: now, comments: [] };
   }
 
   if (!shouldUseOracle()) {
@@ -758,6 +776,8 @@ async function updateCompany(id, { name, status, desireLevel, url, memo }) {
     company.status = status;
     company.desireLevel = desireLevel;
     company.url = url;
+    company.dueDate = dueDate;
+    company.actionItem = actionItem;
     company.memo = memo;
     company.updatedAt = now;
     writeStore(store);
@@ -771,14 +791,16 @@ async function updateCompany(id, { name, status, desireLevel, url, memo }) {
            status = :status,
            desire_level = :desireLevel,
            company_url = :url,
+           company_due_date = TO_DATE(:dueDate, 'YYYY-MM-DD'),
+           action_item = :actionItem,
            memo = :memo,
            updated_at = SYSTIMESTAMP
        WHERE id = :id`,
-      { id, name, status, desireLevel, url, memo },
+      { id, name, status, desireLevel, url, dueDate: dueDate || null, actionItem, memo },
       { autoCommit: true }
     );
     if (result.rowsAffected === 0) return null;
-    return (await findCompany(id)) || { id, name, status, desireLevel, url, memo, createdAt: now, updatedAt: now, comments: [] };
+    return (await findCompany(id)) || { id, name, status, desireLevel, url, dueDate, actionItem, memo, createdAt: now, updatedAt: now, comments: [] };
   });
 }
 
@@ -1126,10 +1148,11 @@ function safeCompany(company) {
     status: company.status,
     desireLevel: DESIRE_LEVELS.includes(company.desireLevel) ? company.desireLevel : "未設定",
     url: company.url || "",
+    dueDate: company.dueDate || "",
+    actionItem: company.actionItem || "",
     memo: company.memo,
     createdAt: company.createdAt,
-    updatedAt: company.updatedAt,
-    comments: company.comments || []
+    updatedAt: company.updatedAt
   };
 }
 
@@ -1174,6 +1197,22 @@ async function handleApi(req, res) {
       authenticated: Boolean(session),
       username: session?.username || null,
       csrfToken: getOrCreateCsrfToken(req, res)
+    });
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/api/app-data") {
+    const [companies, todos, comments] = await Promise.all([
+      listCompanies(),
+      listTodos(),
+      listFreeComments()
+    ]);
+    sendJson(res, 200, {
+      statuses: STATUSES,
+      desireLevels: DESIRE_LEVELS,
+      companies,
+      todos,
+      comments
     });
     return;
   }
@@ -1365,6 +1404,8 @@ async function handleApi(req, res) {
     const status = STATUSES.includes(body.status) ? body.status : STATUSES[0];
     const desireLevel = DESIRE_LEVELS.includes(body.desireLevel) ? body.desireLevel : DESIRE_LEVELS[0];
     const url = cleanUrl(body.url);
+    const dueDate = cleanDate(body.dueDate);
+    const actionItem = cleanText(body.actionItem, 500);
     const memo = cleanText(body.memo, 500);
 
     if (!name) {
@@ -1377,6 +1418,8 @@ async function handleApi(req, res) {
       status,
       desireLevel,
       url,
+      dueDate,
+      actionItem,
       memo
     });
     sendJson(res, 201, { company });
@@ -1407,6 +1450,8 @@ async function handleApi(req, res) {
       status: STATUSES.includes(body.status) ? body.status : existing?.status || STATUSES[0],
       desireLevel: DESIRE_LEVELS.includes(body.desireLevel) ? body.desireLevel : existing?.desireLevel || DESIRE_LEVELS[0],
       url: cleanUrl(body.url),
+      dueDate: cleanDate(body.dueDate),
+      actionItem: cleanText(body.actionItem, 500),
       memo: cleanText(body.memo, 500)
     });
     if (!company) {

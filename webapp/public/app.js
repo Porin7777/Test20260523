@@ -154,7 +154,8 @@ function renderComments(container, comments) {
       deleteButton.addEventListener("click", async () => {
         if (!confirm("このコメントを削除しますか？")) return;
         await api(`/api/free-comments/${comment.id}`, { method: "DELETE" });
-        await loadFreeComments();
+        state.freeComments = state.freeComments.filter((item) => item.id !== comment.id);
+        render();
       });
       header.append(deleteButton);
     }
@@ -190,6 +191,7 @@ function renderCompanies() {
     const title = node.querySelector("h3");
     const pill = node.querySelector(".status-pill");
     const desirePill = node.querySelector(".desire-pill");
+    const details = node.querySelector(".company-details");
     const memo = node.querySelector(".memo");
     const adminActions = node.querySelector(".admin-actions");
     const editArea = node.querySelector(".edit-area");
@@ -197,6 +199,8 @@ function renderCompanies() {
     const editStatus = node.querySelector(".edit-status");
     const editDesireLevel = node.querySelector(".edit-desire-level");
     const editUrl = node.querySelector(".edit-url");
+    const editDueDate = node.querySelector(".edit-due-date");
+    const editActionItem = node.querySelector(".edit-action-item");
     const editMemo = node.querySelector(".edit-memo");
 
     title.innerHTML = "";
@@ -214,12 +218,22 @@ function renderCompanies() {
     pill.dataset.status = company.status;
     desirePill.textContent = `志望度: ${company.desireLevel || "未設定"}`;
     desirePill.dataset.desireLevel = company.desireLevel || "未設定";
+    details.innerHTML = "";
+    if (company.dueDate) {
+      details.append(createCompanyDetail("期限日", formatDateOnly(company.dueDate)));
+    }
+    if (company.actionItem) {
+      details.append(createCompanyDetail("やること", company.actionItem));
+    }
+    details.classList.toggle("hidden", !details.children.length);
     memo.textContent = company.memo || "メモは未入力です。";
     adminActions.classList.toggle("hidden", !state.authenticated);
     populateStatusOptions(editStatus, company.status);
     populateDesireLevelOptions(editDesireLevel, company.desireLevel || "未設定");
     editName.value = company.name;
     editUrl.value = company.url || "";
+    editDueDate.value = company.dueDate || "";
+    editActionItem.value = company.actionItem || "";
     editMemo.value = company.memo || "";
 
     node.querySelector(".edit-button").addEventListener("click", () => {
@@ -232,31 +246,47 @@ function renderCompanies() {
       editStatus.value = company.status;
       editDesireLevel.value = company.desireLevel || "未設定";
       editUrl.value = company.url || "";
+      editDueDate.value = company.dueDate || "";
+      editActionItem.value = company.actionItem || "";
       editMemo.value = company.memo || "";
     });
 
     node.querySelector(".save-button").addEventListener("click", async () => {
-      await api(`/api/companies/${company.id}`, {
+      const payload = await api(`/api/companies/${company.id}`, {
         method: "PUT",
         body: JSON.stringify({
           name: editName.value,
           status: editStatus.value,
           desireLevel: editDesireLevel.value,
           url: editUrl.value,
+          dueDate: editDueDate.value,
+          actionItem: editActionItem.value,
           memo: editMemo.value
         })
       });
-      await loadCompanies();
+      state.companies = state.companies.map((item) => item.id === payload.company.id ? payload.company : item);
+      render();
     });
 
     node.querySelector(".delete-button").addEventListener("click", async () => {
       if (!confirm(`${company.name} を削除しますか？`)) return;
       await api(`/api/companies/${company.id}`, { method: "DELETE" });
-      await loadCompanies();
+      state.companies = state.companies.filter((item) => item.id !== company.id);
+      render();
     });
 
     companyGrid.append(node);
   });
+}
+
+function createCompanyDetail(label, value) {
+  const fragment = document.createDocumentFragment();
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const description = document.createElement("dd");
+  description.textContent = value;
+  fragment.append(term, description);
+  return fragment;
 }
 
 function renderTodos() {
@@ -286,7 +316,9 @@ function renderTodos() {
           done: check.checked
         })
       });
-      await loadTodos();
+      todo.done = check.checked;
+      state.todos = sortTodos(state.todos.map((item) => item.id === todo.id ? { ...item, done: check.checked } : item));
+      render();
     });
 
     const text = document.createElement("div");
@@ -308,12 +340,23 @@ function renderTodos() {
       deleteButton.addEventListener("click", async () => {
         if (!confirm("このやることを削除しますか？")) return;
         await api(`/api/todos/${todo.id}`, { method: "DELETE" });
-        await loadTodos();
+        state.todos = state.todos.filter((item) => item.id !== todo.id);
+        render();
       });
       item.append(deleteButton);
     }
 
     todoList.append(item);
+  });
+}
+
+function sortTodos(todos) {
+  return [...todos].sort((left, right) => {
+    if (left.done !== right.done) return left.done ? 1 : -1;
+    const leftDue = left.dueDate || "9999-12-31";
+    const rightDue = right.dueDate || "9999-12-31";
+    if (leftDue !== rightDue) return leftDue.localeCompare(rightDue);
+    return String(right.createdAt || "").localeCompare(String(left.createdAt || ""));
   });
 }
 
@@ -337,6 +380,18 @@ async function loadCompanies() {
   state.statuses = payload.statuses;
   state.desireLevels = payload.desireLevels || ["未設定", "第一志望", "高", "中", "低"];
   state.companies = payload.companies;
+  populateStatusOptions(statusSelect, state.statuses[0]);
+  populateDesireLevelOptions(desireLevelSelect, state.desireLevels[0]);
+  render();
+}
+
+async function loadAppData() {
+  const payload = await api("/api/app-data");
+  state.statuses = payload.statuses;
+  state.desireLevels = payload.desireLevels || ["未設定", "第一志望", "高", "中", "低"];
+  state.companies = payload.companies;
+  state.todos = payload.todos;
+  state.freeComments = payload.comments;
   populateStatusOptions(statusSelect, state.statuses[0]);
   populateDesireLevelOptions(desireLevelSelect, state.desireLevels[0]);
   render();
@@ -392,55 +447,58 @@ logoutButton.addEventListener("click", async () => {
 companyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const formData = new FormData(companyForm);
-  await api("/api/companies", {
+  const payload = await api("/api/companies", {
     method: "POST",
     body: JSON.stringify({
       name: formData.get("name"),
       status: formData.get("status"),
       desireLevel: formData.get("desireLevel"),
       url: formData.get("url"),
+      dueDate: formData.get("dueDate"),
+      actionItem: formData.get("actionItem"),
       memo: formData.get("memo")
     })
   });
+  state.companies = [payload.company, ...state.companies];
   companyForm.reset();
   populateStatusOptions(statusSelect, state.statuses[0]);
   populateDesireLevelOptions(desireLevelSelect, state.desireLevels[0]);
-  await loadCompanies();
+  render();
 });
 
 todoForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const formData = new FormData(todoForm);
-  await api("/api/todos", {
+  const payload = await api("/api/todos", {
     method: "POST",
     body: JSON.stringify({
       title: formData.get("title"),
       dueDate: formData.get("dueDate")
     })
   });
+  state.todos = sortTodos([payload.todo, ...state.todos]);
   todoForm.reset();
-  await loadTodos();
+  render();
 });
 
 freeCommentForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const formData = new FormData(freeCommentForm);
-  await api("/api/free-comments", {
+  const payload = await api("/api/free-comments", {
     method: "POST",
     body: JSON.stringify({
       author: formData.get("author"),
       body: formData.get("body")
     })
   });
+  state.freeComments = [payload.comment, ...state.freeComments];
   freeCommentForm.reset();
-  await loadFreeComments();
+  render();
 });
 
 (async function init() {
   await loadSession();
-  await loadCompanies();
-  await loadTodos();
-  await loadFreeComments();
+  await loadAppData();
 })().catch((error) => {
   companyGrid.innerHTML = `<div class="empty">${error.message}</div>`;
 });
