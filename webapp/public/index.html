@@ -145,17 +145,20 @@
             <button class="ghost-button cancel-button" type="button">キャンセル</button>
           </div>
         </div>
-        <div class="comments">
-          <h4>コメント</h4>
-          <form class="comment-form">
-            <input name="author" placeholder="お名前（任意）" />
-            <textarea name="body" rows="3" placeholder="外部の方からのコメントを入力" required></textarea>
-            <button class="secondary-button" type="submit">コメント追加</button>
-          </form>
-          <div class="comment-list"></div>
-        </div>
       </article>
     </template>
+
+    <section class="layout free-comment-section" aria-label="フリーコメント">
+      <div class="section-heading">
+        <h2>フリーコメント</h2>
+      </div>
+      <form class="comment-form" id="freeCommentForm">
+        <input name="author" placeholder="お名前（任意）" />
+        <textarea name="body" rows="3" placeholder="自由にコメントを入力" required></textarea>
+        <button class="secondary-button" type="submit">コメント追加</button>
+      </form>
+      <div class="comment-list" id="freeCommentList"></div>
+    </section>
 
     <script src="/app.js"></script>
   </body>

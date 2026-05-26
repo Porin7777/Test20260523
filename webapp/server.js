@@ -109,6 +109,7 @@ function ensureStore() {
   if (!fs.existsSync(STORE_PATH)) {
     const starter = {
       todos: [],
+      freeComments: [],
       companies: [
         {
           id: crypto.randomUUID(),
@@ -119,14 +120,7 @@ function ensureStore() {
           memo: "求人内容と応募書類を確認中",
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
-          comments: [
-            {
-              id: crypto.randomUUID(),
-              author: "キャリア相談者",
-              body: "志望理由の具体性をもう少し足すと伝わりやすそうです。",
-              createdAt: new Date().toISOString()
-            }
-          ]
+          comments: []
         }
       ]
     };
@@ -263,6 +257,14 @@ async function ensureMysqlSchema() {
       updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
+  await mysqlPool.execute(`
+    CREATE TABLE IF NOT EXISTS job_free_comments (
+      id VARCHAR(36) PRIMARY KEY,
+      author VARCHAR(80) NOT NULL,
+      body TEXT NOT NULL,
+      created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
   await runMysqlMigration("ALTER TABLE job_companies ADD COLUMN desire_level VARCHAR(40) NOT NULL DEFAULT '未設定'");
   await runMysqlMigration("ALTER TABLE job_companies ADD COLUMN company_url VARCHAR(500)");
 }
@@ -332,6 +334,15 @@ async function ensureOracleSchema() {
         done NUMBER(1) DEFAULT 0 NOT NULL,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL,
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+      )`
+    );
+    await runOracleDdl(
+      connection,
+      `CREATE TABLE job_free_comments (
+        id VARCHAR2(36) PRIMARY KEY,
+        author VARCHAR2(80) NOT NULL,
+        body CLOB NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL
       )`
     );
   });
@@ -564,6 +575,94 @@ async function deleteTodo(id) {
   });
 }
 
+async function listFreeComments() {
+  if (shouldUseMysql()) {
+    const [rows] = await mysqlPool.execute(
+      `SELECT id, author, body, created_at
+       FROM job_free_comments
+       ORDER BY created_at DESC`
+    );
+    return rows.map(mysqlRowToComment);
+  }
+
+  if (!shouldUseOracle()) {
+    return (readStore().freeComments || []);
+  }
+
+  return withOracleConnection(async (connection) => {
+    const result = await connection.execute(
+      `SELECT id, author, body, created_at
+       FROM job_free_comments
+       ORDER BY created_at DESC`,
+      {},
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    return result.rows.map(rowToComment);
+  });
+}
+
+async function createFreeComment({ author, body }) {
+  const comment = {
+    id: crypto.randomUUID(),
+    author,
+    body,
+    createdAt: new Date().toISOString()
+  };
+
+  if (shouldUseMysql()) {
+    await mysqlPool.execute(
+      `INSERT INTO job_free_comments (id, author, body)
+       VALUES (:id, :author, :body)`,
+      comment
+    );
+    return comment;
+  }
+
+  if (!shouldUseOracle()) {
+    const store = readStore();
+    store.freeComments = store.freeComments || [];
+    store.freeComments.unshift(comment);
+    writeStore(store);
+    return comment;
+  }
+
+  await withOracleConnection(async (connection) => {
+    await connection.execute(
+      `INSERT INTO job_free_comments (id, author, body, created_at)
+       VALUES (:id, :author, :body, SYSTIMESTAMP)`,
+      comment,
+      { autoCommit: true }
+    );
+  });
+  return comment;
+}
+
+async function deleteFreeComment(commentId) {
+  if (shouldUseMysql()) {
+    const [result] = await mysqlPool.execute("DELETE FROM job_free_comments WHERE id = :commentId", { commentId });
+    return result.affectedRows > 0;
+  }
+
+  if (!shouldUseOracle()) {
+    const store = readStore();
+    store.freeComments = store.freeComments || [];
+    const before = store.freeComments.length;
+    store.freeComments = store.freeComments.filter((comment) => comment.id !== commentId);
+    if (store.freeComments.length === before) return false;
+    writeStore(store);
+    return true;
+  }
+
+  return withOracleConnection(async (connection) => {
+    const result = await connection.execute(
+      "DELETE FROM job_free_comments WHERE id = :commentId",
+      { commentId },
+      { autoCommit: true }
+    );
+    return result.rowsAffected > 0;
+  });
+}
+
 async function listCompanies() {
   if (shouldUseMysql()) {
     const [companyRows] = await mysqlPool.execute(
@@ -571,17 +670,7 @@ async function listCompanies() {
        FROM job_companies
        ORDER BY created_at DESC`
     );
-    const [commentRows] = await mysqlPool.execute(
-      `SELECT id, company_id, author, body, created_at
-       FROM job_comments
-       ORDER BY created_at DESC`
-    );
     const companies = companyRows.map(mysqlRowToCompany);
-    const companiesById = new Map(companies.map((company) => [company.id, company]));
-    commentRows.forEach((row) => {
-      const company = companiesById.get(row.company_id);
-      if (company) company.comments.push(mysqlRowToComment(row));
-    });
     return companies.map(safeCompany);
   }
 
@@ -597,19 +686,7 @@ async function listCompanies() {
       {},
       { outFormat: oracledb.OUT_FORMAT_OBJECT }
     );
-    const commentResult = await connection.execute(
-      `SELECT id, company_id, author, body, created_at
-       FROM job_comments
-       ORDER BY created_at DESC`,
-      {},
-      { outFormat: oracledb.OUT_FORMAT_OBJECT }
-    );
     const companies = companyResult.rows.map(rowToCompany);
-    const companiesById = new Map(companies.map((company) => [company.id, company]));
-    commentResult.rows.forEach((row) => {
-      const company = companiesById.get(row.COMPANY_ID);
-      if (company) company.comments.push(rowToComment(row));
-    });
     return companies.map(safeCompany);
   });
 }
@@ -1156,6 +1233,51 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (method === "GET" && url.pathname === "/api/free-comments") {
+    sendJson(res, 200, { comments: await listFreeComments() });
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/free-comments") {
+    if (!requireCsrf(req, res)) return;
+    const retryAfter = rateLimit(req, "comment", 12, 10 * 60 * 1000);
+    if (retryAfter) {
+      res.setHeader("Retry-After", String(retryAfter));
+      sendError(res, 429, "コメント投稿が多すぎます。少し待ってから再試行してください。");
+      return;
+    }
+
+    const body = await collectBody(req);
+    const author = cleanText(body.author, 80) || "匿名";
+    const commentBody = cleanText(body.body, 800);
+    if (!commentBody) {
+      sendError(res, 400, "コメントを入力してください。");
+      return;
+    }
+
+    sendJson(res, 201, { comment: await createFreeComment({ author, body: commentBody }) });
+    return;
+  }
+
+  const freeCommentDeleteMatch = url.pathname.match(/^\/api\/free-comments\/([^/]+)$/);
+  if (freeCommentDeleteMatch && method === "DELETE") {
+    if (!requireCsrf(req, res)) return;
+    if (!requireAuth(req, res)) return;
+    const retryAfter = rateLimit(req, "admin-write", 60, 60 * 1000);
+    if (retryAfter) {
+      res.setHeader("Retry-After", String(retryAfter));
+      sendError(res, 429, "更新操作が多すぎます。少し待ってから再試行してください。");
+      return;
+    }
+
+    if (!(await deleteFreeComment(freeCommentDeleteMatch[1]))) {
+      sendError(res, 404, "コメントが見つかりません。");
+      return;
+    }
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   if (method === "POST" && url.pathname === "/api/todos") {
     if (!requireCsrf(req, res)) return;
     if (!requireAuth(req, res)) return;
@@ -1307,56 +1429,6 @@ async function handleApi(req, res) {
 
     if (!(await deleteCompany(companyMatch[1]))) {
       sendError(res, 404, "会社が見つかりません。");
-      return;
-    }
-    sendJson(res, 200, { ok: true });
-    return;
-  }
-
-  const commentMatch = url.pathname.match(/^\/api\/companies\/([^/]+)\/comments$/);
-  if (commentMatch && method === "POST") {
-    if (!requireCsrf(req, res)) return;
-    const retryAfter = rateLimit(req, "comment", 12, 10 * 60 * 1000);
-    if (retryAfter) {
-      res.setHeader("Retry-After", String(retryAfter));
-      sendError(res, 429, "コメント投稿が多すぎます。少し待ってから再試行してください。");
-      return;
-    }
-
-    const body = await collectBody(req);
-    const author = cleanText(body.author, 80) || "匿名";
-    const commentBody = cleanText(body.body, 800);
-
-    if (!commentBody) {
-      sendError(res, 400, "コメントを入力してください。");
-      return;
-    }
-
-    const comment = await createComment(commentMatch[1], {
-      author,
-      body: commentBody
-    });
-    if (!comment) {
-      sendError(res, 404, "会社が見つかりません。");
-      return;
-    }
-    sendJson(res, 201, { comment });
-    return;
-  }
-
-  const commentDeleteMatch = url.pathname.match(/^\/api\/comments\/([^/]+)$/);
-  if (commentDeleteMatch && method === "DELETE") {
-    if (!requireCsrf(req, res)) return;
-    if (!requireAuth(req, res)) return;
-    const retryAfter = rateLimit(req, "admin-write", 60, 60 * 1000);
-    if (retryAfter) {
-      res.setHeader("Retry-After", String(retryAfter));
-      sendError(res, 429, "更新操作が多すぎます。少し待ってから再試行してください。");
-      return;
-    }
-
-    if (!(await deleteComment(commentDeleteMatch[1]))) {
-      sendError(res, 404, "コメントが見つかりません。");
       return;
     }
     sendJson(res, 200, { ok: true });

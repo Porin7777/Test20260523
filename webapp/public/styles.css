@@ -420,6 +420,20 @@ button:hover {
   padding-top: 14px;
 }
 
+.free-comment-section {
+  margin-top: 0;
+  margin-bottom: 56px;
+}
+
+.free-comment-section .comment-form {
+  padding: 16px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: var(--shadow);
+}
+
 .comments h4 {
   margin-bottom: 10px;
   font-size: 1rem;

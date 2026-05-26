@@ -3,6 +3,7 @@ const state = {
   desireLevels: [],
   companies: [],
   todos: [],
+  freeComments: [],
   selectedStatus: "すべて",
   authenticated: false,
   csrfToken: ""
@@ -25,6 +26,8 @@ const companyGrid = document.querySelector("#companyGrid");
 const companyTemplate = document.querySelector("#companyTemplate");
 const todoForm = document.querySelector("#todoForm");
 const todoList = document.querySelector("#todoList");
+const freeCommentForm = document.querySelector("#freeCommentForm");
+const freeCommentList = document.querySelector("#freeCommentList");
 
 async function api(path, options = {}) {
   const headers = {
@@ -150,8 +153,8 @@ function renderComments(container, comments) {
       deleteButton.textContent = "削除";
       deleteButton.addEventListener("click", async () => {
         if (!confirm("このコメントを削除しますか？")) return;
-        await api(`/api/comments/${comment.id}`, { method: "DELETE" });
-        await loadCompanies();
+        await api(`/api/free-comments/${comment.id}`, { method: "DELETE" });
+        await loadFreeComments();
       });
       header.append(deleteButton);
     }
@@ -195,8 +198,6 @@ function renderCompanies() {
     const editDesireLevel = node.querySelector(".edit-desire-level");
     const editUrl = node.querySelector(".edit-url");
     const editMemo = node.querySelector(".edit-memo");
-    const commentForm = node.querySelector(".comment-form");
-    const commentList = node.querySelector(".comment-list");
 
     title.innerHTML = "";
     if (company.url) {
@@ -215,7 +216,6 @@ function renderCompanies() {
     desirePill.dataset.desireLevel = company.desireLevel || "未設定";
     memo.textContent = company.memo || "メモは未入力です。";
     adminActions.classList.toggle("hidden", !state.authenticated);
-    renderComments(commentList, company.comments || []);
     populateStatusOptions(editStatus, company.status);
     populateDesireLevelOptions(editDesireLevel, company.desireLevel || "未設定");
     editName.value = company.name;
@@ -252,20 +252,6 @@ function renderCompanies() {
     node.querySelector(".delete-button").addEventListener("click", async () => {
       if (!confirm(`${company.name} を削除しますか？`)) return;
       await api(`/api/companies/${company.id}`, { method: "DELETE" });
-      await loadCompanies();
-    });
-
-    commentForm.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const formData = new FormData(commentForm);
-      await api(`/api/companies/${company.id}/comments`, {
-        method: "POST",
-        body: JSON.stringify({
-          author: formData.get("author"),
-          body: formData.get("body")
-        })
-      });
-      commentForm.reset();
       await loadCompanies();
     });
 
@@ -336,6 +322,7 @@ function render() {
   renderTabs();
   renderTodos();
   renderCompanies();
+  renderComments(freeCommentList, state.freeComments);
   updateSessionUi();
 }
 
@@ -358,6 +345,12 @@ async function loadCompanies() {
 async function loadTodos() {
   const payload = await api("/api/todos");
   state.todos = payload.todos;
+  render();
+}
+
+async function loadFreeComments() {
+  const payload = await api("/api/free-comments");
+  state.freeComments = payload.comments;
   render();
 }
 
@@ -429,10 +422,25 @@ todoForm.addEventListener("submit", async (event) => {
   await loadTodos();
 });
 
+freeCommentForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const formData = new FormData(freeCommentForm);
+  await api("/api/free-comments", {
+    method: "POST",
+    body: JSON.stringify({
+      author: formData.get("author"),
+      body: formData.get("body")
+    })
+  });
+  freeCommentForm.reset();
+  await loadFreeComments();
+});
+
 (async function init() {
   await loadSession();
   await loadCompanies();
   await loadTodos();
+  await loadFreeComments();
 })().catch((error) => {
   companyGrid.innerHTML = `<div class="empty">${error.message}</div>`;
 });
