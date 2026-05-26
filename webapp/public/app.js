@@ -46,13 +46,15 @@ async function api(path, options = {}) {
 }
 
 function formatDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
   return new Intl.DateTimeFormat("ja-JP", {
     year: "numeric",
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit"
-  }).format(new Date(value));
+  }).format(date);
 }
 
 function populateStatusOptions(select, selected) {
@@ -85,11 +87,13 @@ function updateSessionUi() {
 
 function formatDateOnly(value) {
   if (!value) return "期限なし";
+  const date = new Date(/^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00` : value);
+  if (Number.isNaN(date.getTime())) return "期限なし";
   return new Intl.DateTimeFormat("ja-JP", {
     year: "numeric",
     month: "short",
     day: "numeric"
-  }).format(new Date(`${value}T00:00:00`));
+  }).format(date);
 }
 
 function renderSummary() {

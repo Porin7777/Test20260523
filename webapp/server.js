@@ -391,7 +391,7 @@ function mysqlRowToTodo(row) {
   return {
     id: row.id,
     title: row.title,
-    dueDate: row.due_date ? String(row.due_date).slice(0, 10) : "",
+    dueDate: dateOnly(row.due_date),
     done: Boolean(row.done),
     createdAt: normalizeDate(row.created_at),
     updatedAt: normalizeDate(row.updated_at)
@@ -402,11 +402,19 @@ function rowToTodo(row) {
   return {
     id: row.ID,
     title: row.TITLE,
-    dueDate: row.DUE_DATE ? normalizeDate(row.DUE_DATE).slice(0, 10) : "",
+    dueDate: dateOnly(row.DUE_DATE),
     done: Boolean(row.DONE),
     createdAt: normalizeDate(row.CREATED_AT),
     updatedAt: normalizeDate(row.UPDATED_AT)
   };
+}
+
+function dateOnly(value) {
+  if (!value) return "";
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString().slice(0, 10);
 }
 
 function safeTodo(todo) {
