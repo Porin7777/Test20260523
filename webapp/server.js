@@ -43,6 +43,14 @@ const STATUSES = [
   "辞退・不採用"
 ];
 
+const DESIRE_LEVELS = [
+  "未設定",
+  "第一志望",
+  "高",
+  "中",
+  "低"
+];
+
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -100,11 +108,14 @@ function ensureStore() {
 
   if (!fs.existsSync(STORE_PATH)) {
     const starter = {
+      todos: [],
       companies: [
         {
           id: crypto.randomUUID(),
           name: "サンプル株式会社",
           status: "エントリー済み",
+          desireLevel: "未設定",
+          url: "",
           memo: "求人内容と応募書類を確認中",
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -125,7 +136,7 @@ function ensureStore() {
 
 function readStore() {
   ensureStore();
-  return JSON.parse(fs.readFileSync(STORE_PATH, "utf8"));
+  return JSON.parse(fs.readFileSync(STORE_PATH, "utf8").replace(/^\uFEFF/, ""));
 }
 
 function writeStore(store) {
@@ -222,6 +233,8 @@ async function ensureMysqlSchema() {
       id VARCHAR(36) PRIMARY KEY,
       name VARCHAR(120) NOT NULL,
       status VARCHAR(40) NOT NULL,
+      desire_level VARCHAR(40) NOT NULL DEFAULT '未設定',
+      company_url VARCHAR(500),
       memo TEXT,
       created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
       updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
@@ -237,9 +250,29 @@ async function ensureMysqlSchema() {
       INDEX job_comments_company_idx (company_id),
       CONSTRAINT job_comments_company_fk
         FOREIGN KEY (company_id) REFERENCES job_companies(id)
-        ON DELETE CASCADE
+      ON DELETE CASCADE
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
+  await mysqlPool.execute(`
+    CREATE TABLE IF NOT EXISTS job_todos (
+      id VARCHAR(36) PRIMARY KEY,
+      title VARCHAR(160) NOT NULL,
+      due_date DATE,
+      done TINYINT(1) NOT NULL DEFAULT 0,
+      created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+  await runMysqlMigration("ALTER TABLE job_companies ADD COLUMN desire_level VARCHAR(40) NOT NULL DEFAULT '未設定'");
+  await runMysqlMigration("ALTER TABLE job_companies ADD COLUMN company_url VARCHAR(500)");
+}
+
+async function runMysqlMigration(sql) {
+  try {
+    await mysqlPool.execute(sql);
+  } catch (error) {
+    if (error.code !== "ER_DUP_FIELDNAME") throw error;
+  }
 }
 
 async function withOracleConnection(callback) {
@@ -255,7 +288,7 @@ async function runOracleDdl(connection, sql) {
   try {
     await connection.execute(sql);
   } catch (error) {
-    if (error.errorNum !== 955) throw error;
+    if (![955, 1430].includes(error.errorNum)) throw error;
   }
 }
 
@@ -267,6 +300,8 @@ async function ensureOracleSchema() {
         id VARCHAR2(36) PRIMARY KEY,
         name VARCHAR2(120) NOT NULL,
         status VARCHAR2(40) NOT NULL,
+        desire_level VARCHAR2(40) DEFAULT '未設定' NOT NULL,
+        company_url VARCHAR2(500),
         memo CLOB,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL,
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL
@@ -286,6 +321,19 @@ async function ensureOracleSchema() {
       )`
     );
     await runOracleDdl(connection, "CREATE INDEX job_comments_company_idx ON job_comments(company_id)");
+    await runOracleDdl(connection, "ALTER TABLE job_companies ADD desire_level VARCHAR2(40) DEFAULT '未設定' NOT NULL");
+    await runOracleDdl(connection, "ALTER TABLE job_companies ADD company_url VARCHAR2(500)");
+    await runOracleDdl(
+      connection,
+      `CREATE TABLE job_todos (
+        id VARCHAR2(36) PRIMARY KEY,
+        title VARCHAR2(160) NOT NULL,
+        due_date DATE,
+        done NUMBER(1) DEFAULT 0 NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+      )`
+    );
   });
 }
 
@@ -298,6 +346,8 @@ function rowToCompany(row) {
     id: row.ID,
     name: row.NAME,
     status: row.STATUS,
+    desireLevel: row.DESIRE_LEVEL || "未設定",
+    url: row.COMPANY_URL || "",
     memo: row.MEMO || "",
     createdAt: normalizeDate(row.CREATED_AT),
     updatedAt: normalizeDate(row.UPDATED_AT),
@@ -319,6 +369,8 @@ function mysqlRowToCompany(row) {
     id: row.id,
     name: row.name,
     status: row.status,
+    desireLevel: row.desire_level || "未設定",
+    url: row.company_url || "",
     memo: row.memo || "",
     createdAt: normalizeDate(row.created_at),
     updatedAt: normalizeDate(row.updated_at),
@@ -335,10 +387,179 @@ function mysqlRowToComment(row) {
   };
 }
 
+function mysqlRowToTodo(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    dueDate: row.due_date ? String(row.due_date).slice(0, 10) : "",
+    done: Boolean(row.done),
+    createdAt: normalizeDate(row.created_at),
+    updatedAt: normalizeDate(row.updated_at)
+  };
+}
+
+function rowToTodo(row) {
+  return {
+    id: row.ID,
+    title: row.TITLE,
+    dueDate: row.DUE_DATE ? normalizeDate(row.DUE_DATE).slice(0, 10) : "",
+    done: Boolean(row.DONE),
+    createdAt: normalizeDate(row.CREATED_AT),
+    updatedAt: normalizeDate(row.UPDATED_AT)
+  };
+}
+
+function safeTodo(todo) {
+  return {
+    id: todo.id,
+    title: todo.title,
+    dueDate: todo.dueDate || "",
+    done: Boolean(todo.done),
+    createdAt: todo.createdAt,
+    updatedAt: todo.updatedAt
+  };
+}
+
+async function listTodos() {
+  if (shouldUseMysql()) {
+    const [rows] = await mysqlPool.execute(
+      `SELECT id, title, due_date, done, created_at, updated_at
+       FROM job_todos
+       ORDER BY done ASC, COALESCE(due_date, '9999-12-31') ASC, created_at DESC`
+    );
+    return rows.map(mysqlRowToTodo).map(safeTodo);
+  }
+
+  if (!shouldUseOracle()) {
+    return (readStore().todos || []).map(safeTodo);
+  }
+
+  return withOracleConnection(async (connection) => {
+    const result = await connection.execute(
+      `SELECT id, title, due_date, done, created_at, updated_at
+       FROM job_todos
+       ORDER BY done ASC, NVL(due_date, DATE '9999-12-31') ASC, created_at DESC`,
+      {},
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    return result.rows.map(rowToTodo).map(safeTodo);
+  });
+}
+
+async function createTodo({ title, dueDate }) {
+  const now = new Date().toISOString();
+  const todo = {
+    id: crypto.randomUUID(),
+    title,
+    dueDate,
+    done: false,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  if (shouldUseMysql()) {
+    await mysqlPool.execute(
+      `INSERT INTO job_todos (id, title, due_date, done)
+       VALUES (:id, :title, :dueDate, 0)`,
+      { id: todo.id, title, dueDate: dueDate || null }
+    );
+    return safeTodo(todo);
+  }
+
+  if (!shouldUseOracle()) {
+    const store = readStore();
+    store.todos = store.todos || [];
+    store.todos.unshift(todo);
+    writeStore(store);
+    return safeTodo(todo);
+  }
+
+  await withOracleConnection(async (connection) => {
+    await connection.execute(
+      `INSERT INTO job_todos (id, title, due_date, done, created_at, updated_at)
+       VALUES (:id, :title, TO_DATE(:dueDate, 'YYYY-MM-DD'), 0, SYSTIMESTAMP, SYSTIMESTAMP)`,
+      { id: todo.id, title, dueDate: dueDate || null },
+      { autoCommit: true }
+    );
+  });
+  return safeTodo(todo);
+}
+
+async function updateTodo(id, { title, dueDate, done }) {
+  const now = new Date().toISOString();
+
+  if (shouldUseMysql()) {
+    const [result] = await mysqlPool.execute(
+      `UPDATE job_todos
+       SET title = :title,
+           due_date = :dueDate,
+           done = :done
+       WHERE id = :id`,
+      { id, title, dueDate: dueDate || null, done: done ? 1 : 0 }
+    );
+    if (result.affectedRows === 0) return null;
+    return (await listTodos()).find((todo) => todo.id === id) || null;
+  }
+
+  if (!shouldUseOracle()) {
+    const store = readStore();
+    store.todos = store.todos || [];
+    const todo = store.todos.find((item) => item.id === id);
+    if (!todo) return null;
+    todo.title = title;
+    todo.dueDate = dueDate;
+    todo.done = Boolean(done);
+    todo.updatedAt = now;
+    writeStore(store);
+    return safeTodo(todo);
+  }
+
+  return withOracleConnection(async (connection) => {
+    const result = await connection.execute(
+      `UPDATE job_todos
+       SET title = :title,
+           due_date = TO_DATE(:dueDate, 'YYYY-MM-DD'),
+           done = :done,
+           updated_at = SYSTIMESTAMP
+       WHERE id = :id`,
+      { id, title, dueDate: dueDate || null, done: done ? 1 : 0 },
+      { autoCommit: true }
+    );
+    if (result.rowsAffected === 0) return null;
+    return (await listTodos()).find((todo) => todo.id === id) || null;
+  });
+}
+
+async function deleteTodo(id) {
+  if (shouldUseMysql()) {
+    const [result] = await mysqlPool.execute("DELETE FROM job_todos WHERE id = :id", { id });
+    return result.affectedRows > 0;
+  }
+
+  if (!shouldUseOracle()) {
+    const store = readStore();
+    store.todos = store.todos || [];
+    const before = store.todos.length;
+    store.todos = store.todos.filter((todo) => todo.id !== id);
+    if (store.todos.length === before) return false;
+    writeStore(store);
+    return true;
+  }
+
+  return withOracleConnection(async (connection) => {
+    const result = await connection.execute(
+      "DELETE FROM job_todos WHERE id = :id",
+      { id },
+      { autoCommit: true }
+    );
+    return result.rowsAffected > 0;
+  });
+}
+
 async function listCompanies() {
   if (shouldUseMysql()) {
     const [companyRows] = await mysqlPool.execute(
-      `SELECT id, name, status, memo, created_at, updated_at
+      `SELECT id, name, status, desire_level, company_url, memo, created_at, updated_at
        FROM job_companies
        ORDER BY created_at DESC`
     );
@@ -362,7 +583,7 @@ async function listCompanies() {
 
   return withOracleConnection(async (connection) => {
     const companyResult = await connection.execute(
-      `SELECT id, name, status, memo, created_at, updated_at
+      `SELECT id, name, status, desire_level, company_url, memo, created_at, updated_at
        FROM job_companies
        ORDER BY created_at DESC`,
       {},
@@ -385,12 +606,14 @@ async function listCompanies() {
   });
 }
 
-async function createCompany({ name, status, memo }) {
+async function createCompany({ name, status, desireLevel, url, memo }) {
   const now = new Date().toISOString();
   const company = {
     id: crypto.randomUUID(),
     name,
     status,
+    desireLevel,
+    url,
     memo,
     createdAt: now,
     updatedAt: now,
@@ -399,9 +622,9 @@ async function createCompany({ name, status, memo }) {
 
   if (shouldUseMysql()) {
     await mysqlPool.execute(
-      `INSERT INTO job_companies (id, name, status, memo)
-       VALUES (:id, :name, :status, :memo)`,
-      { id: company.id, name, status, memo }
+      `INSERT INTO job_companies (id, name, status, desire_level, company_url, memo)
+       VALUES (:id, :name, :status, :desireLevel, :url, :memo)`,
+      { id: company.id, name, status, desireLevel, url, memo }
     );
     return safeCompany(company);
   }
@@ -415,16 +638,16 @@ async function createCompany({ name, status, memo }) {
 
   await withOracleConnection(async (connection) => {
     await connection.execute(
-      `INSERT INTO job_companies (id, name, status, memo, created_at, updated_at)
-       VALUES (:id, :name, :status, :memo, SYSTIMESTAMP, SYSTIMESTAMP)`,
-      { id: company.id, name, status, memo },
+      `INSERT INTO job_companies (id, name, status, desire_level, company_url, memo, created_at, updated_at)
+       VALUES (:id, :name, :status, :desireLevel, :url, :memo, SYSTIMESTAMP, SYSTIMESTAMP)`,
+      { id: company.id, name, status, desireLevel, url, memo },
       { autoCommit: true }
     );
   });
   return safeCompany(company);
 }
 
-async function updateCompany(id, { name, status, memo }) {
+async function updateCompany(id, { name, status, desireLevel, url, memo }) {
   const now = new Date().toISOString();
 
   if (shouldUseMysql()) {
@@ -432,12 +655,14 @@ async function updateCompany(id, { name, status, memo }) {
       `UPDATE job_companies
        SET name = :name,
            status = :status,
+           desire_level = :desireLevel,
+           company_url = :url,
            memo = :memo
        WHERE id = :id`,
-      { id, name, status, memo }
+      { id, name, status, desireLevel, url, memo }
     );
     if (result.affectedRows === 0) return null;
-    return (await findCompany(id)) || { id, name, status, memo, createdAt: now, updatedAt: now, comments: [] };
+    return (await findCompany(id)) || { id, name, status, desireLevel, url, memo, createdAt: now, updatedAt: now, comments: [] };
   }
 
   if (!shouldUseOracle()) {
@@ -446,6 +671,8 @@ async function updateCompany(id, { name, status, memo }) {
     if (!company) return null;
     company.name = name;
     company.status = status;
+    company.desireLevel = desireLevel;
+    company.url = url;
     company.memo = memo;
     company.updatedAt = now;
     writeStore(store);
@@ -457,14 +684,16 @@ async function updateCompany(id, { name, status, memo }) {
       `UPDATE job_companies
        SET name = :name,
            status = :status,
+           desire_level = :desireLevel,
+           company_url = :url,
            memo = :memo,
            updated_at = SYSTIMESTAMP
        WHERE id = :id`,
-      { id, name, status, memo },
+      { id, name, status, desireLevel, url, memo },
       { autoCommit: true }
     );
     if (result.rowsAffected === 0) return null;
-    return (await findCompany(id)) || { id, name, status, memo, createdAt: now, updatedAt: now, comments: [] };
+    return (await findCompany(id)) || { id, name, status, desireLevel, url, memo, createdAt: now, updatedAt: now, comments: [] };
   });
 }
 
@@ -541,6 +770,36 @@ async function createComment(companyId, { author, body }) {
       { autoCommit: true }
     );
     return comment;
+  });
+}
+
+async function deleteComment(commentId) {
+  if (shouldUseMysql()) {
+    const [result] = await mysqlPool.execute("DELETE FROM job_comments WHERE id = :commentId", { commentId });
+    return result.affectedRows > 0;
+  }
+
+  if (!shouldUseOracle()) {
+    const store = readStore();
+    let deleted = false;
+    store.companies.forEach((company) => {
+      const comments = company.comments || [];
+      const before = comments.length;
+      company.comments = comments.filter((comment) => comment.id !== commentId);
+      if (company.comments.length !== before) deleted = true;
+    });
+    if (!deleted) return false;
+    writeStore(store);
+    return true;
+  }
+
+  return withOracleConnection(async (connection) => {
+    const result = await connection.execute(
+      "DELETE FROM job_comments WHERE id = :commentId",
+      { commentId },
+      { autoCommit: true }
+    );
+    return result.rowsAffected > 0;
   });
 }
 
@@ -754,11 +1013,34 @@ function cleanText(value, maxLength) {
     .slice(0, maxLength);
 }
 
+function cleanUrl(value) {
+  let url = cleanText(value, 500);
+  if (!url) return "";
+  if (!/^https?:\/\//i.test(url)) {
+    url = `https://${url}`;
+  }
+
+  try {
+    const parsed = new URL(url);
+    return ["http:", "https:"].includes(parsed.protocol) ? parsed.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function cleanDate(value) {
+  const date = cleanText(value, 10);
+  if (!date) return "";
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : "";
+}
+
 function safeCompany(company) {
   return {
     id: company.id,
     name: company.name,
     status: company.status,
+    desireLevel: DESIRE_LEVELS.includes(company.desireLevel) ? company.desireLevel : "未設定",
+    url: company.url || "",
     memo: company.memo,
     createdAt: company.createdAt,
     updatedAt: company.updatedAt,
@@ -855,8 +1137,86 @@ async function handleApi(req, res) {
   if (method === "GET" && url.pathname === "/api/companies") {
     sendJson(res, 200, {
       statuses: STATUSES,
+      desireLevels: DESIRE_LEVELS,
       companies: await listCompanies()
     });
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/api/todos") {
+    sendJson(res, 200, { todos: await listTodos() });
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/todos") {
+    if (!requireCsrf(req, res)) return;
+    if (!requireAuth(req, res)) return;
+    const retryAfter = rateLimit(req, "admin-write", 60, 60 * 1000);
+    if (retryAfter) {
+      res.setHeader("Retry-After", String(retryAfter));
+      sendError(res, 429, "更新操作が多すぎます。少し待ってから再試行してください。");
+      return;
+    }
+
+    const body = await collectBody(req);
+    const title = cleanText(body.title, 160);
+    const dueDate = cleanDate(body.dueDate);
+    if (!title) {
+      sendError(res, 400, "やることを入力してください。");
+      return;
+    }
+
+    sendJson(res, 201, { todo: await createTodo({ title, dueDate }) });
+    return;
+  }
+
+  const todoMatch = url.pathname.match(/^\/api\/todos\/([^/]+)$/);
+  if (todoMatch && method === "PUT") {
+    if (!requireCsrf(req, res)) return;
+    if (!requireAuth(req, res)) return;
+    const retryAfter = rateLimit(req, "admin-write", 60, 60 * 1000);
+    if (retryAfter) {
+      res.setHeader("Retry-After", String(retryAfter));
+      sendError(res, 429, "更新操作が多すぎます。少し待ってから再試行してください。");
+      return;
+    }
+
+    const body = await collectBody(req);
+    const title = cleanText(body.title, 160);
+    const dueDate = cleanDate(body.dueDate);
+    if (!title) {
+      sendError(res, 400, "やることを入力してください。");
+      return;
+    }
+
+    const todo = await updateTodo(todoMatch[1], {
+      title,
+      dueDate,
+      done: Boolean(body.done)
+    });
+    if (!todo) {
+      sendError(res, 404, "やることが見つかりません。");
+      return;
+    }
+    sendJson(res, 200, { todo });
+    return;
+  }
+
+  if (todoMatch && method === "DELETE") {
+    if (!requireCsrf(req, res)) return;
+    if (!requireAuth(req, res)) return;
+    const retryAfter = rateLimit(req, "admin-write", 60, 60 * 1000);
+    if (retryAfter) {
+      res.setHeader("Retry-After", String(retryAfter));
+      sendError(res, 429, "更新操作が多すぎます。少し待ってから再試行してください。");
+      return;
+    }
+
+    if (!(await deleteTodo(todoMatch[1]))) {
+      sendError(res, 404, "やることが見つかりません。");
+      return;
+    }
+    sendJson(res, 200, { ok: true });
     return;
   }
 
@@ -873,6 +1233,8 @@ async function handleApi(req, res) {
     const body = await collectBody(req);
     const name = cleanText(body.name, 120);
     const status = STATUSES.includes(body.status) ? body.status : STATUSES[0];
+    const desireLevel = DESIRE_LEVELS.includes(body.desireLevel) ? body.desireLevel : DESIRE_LEVELS[0];
+    const url = cleanUrl(body.url);
     const memo = cleanText(body.memo, 500);
 
     if (!name) {
@@ -883,6 +1245,8 @@ async function handleApi(req, res) {
     const company = await createCompany({
       name,
       status,
+      desireLevel,
+      url,
       memo
     });
     sendJson(res, 201, { company });
@@ -911,6 +1275,8 @@ async function handleApi(req, res) {
     const company = await updateCompany(companyMatch[1], {
       name,
       status: STATUSES.includes(body.status) ? body.status : existing?.status || STATUSES[0],
+      desireLevel: DESIRE_LEVELS.includes(body.desireLevel) ? body.desireLevel : existing?.desireLevel || DESIRE_LEVELS[0],
+      url: cleanUrl(body.url),
       memo: cleanText(body.memo, 500)
     });
     if (!company) {
@@ -967,6 +1333,25 @@ async function handleApi(req, res) {
       return;
     }
     sendJson(res, 201, { comment });
+    return;
+  }
+
+  const commentDeleteMatch = url.pathname.match(/^\/api\/comments\/([^/]+)$/);
+  if (commentDeleteMatch && method === "DELETE") {
+    if (!requireCsrf(req, res)) return;
+    if (!requireAuth(req, res)) return;
+    const retryAfter = rateLimit(req, "admin-write", 60, 60 * 1000);
+    if (retryAfter) {
+      res.setHeader("Retry-After", String(retryAfter));
+      sendError(res, 429, "更新操作が多すぎます。少し待ってから再試行してください。");
+      return;
+    }
+
+    if (!(await deleteComment(commentDeleteMatch[1]))) {
+      sendError(res, 404, "コメントが見つかりません。");
+      return;
+    }
+    sendJson(res, 200, { ok: true });
     return;
   }
 

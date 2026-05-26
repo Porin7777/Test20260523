@@ -1,6 +1,8 @@
 const state = {
   statuses: [],
+  desireLevels: [],
   companies: [],
+  todos: [],
   selectedStatus: "すべて",
   authenticated: false,
   csrfToken: ""
@@ -17,9 +19,12 @@ const loginMessage = document.querySelector("#loginMessage");
 const logoutButton = document.querySelector("#logoutButton");
 const companyForm = document.querySelector("#companyForm");
 const statusSelect = document.querySelector("#statusSelect");
+const desireLevelSelect = document.querySelector("#desireLevelSelect");
 const statusTabs = document.querySelector("#statusTabs");
 const companyGrid = document.querySelector("#companyGrid");
 const companyTemplate = document.querySelector("#companyTemplate");
+const todoForm = document.querySelector("#todoForm");
+const todoList = document.querySelector("#todoList");
 
 async function api(path, options = {}) {
   const headers = {
@@ -51,8 +56,16 @@ function formatDate(value) {
 }
 
 function populateStatusOptions(select, selected) {
+  populateOptions(select, state.statuses, selected);
+}
+
+function populateDesireLevelOptions(select, selected) {
+  populateOptions(select, state.desireLevels, selected);
+}
+
+function populateOptions(select, values, selected) {
   select.innerHTML = "";
-  state.statuses.forEach((status) => {
+  values.forEach((status) => {
     const option = document.createElement("option");
     option.value = status;
     option.textContent = status;
@@ -64,9 +77,19 @@ function populateStatusOptions(select, selected) {
 function updateSessionUi() {
   loginToggle.textContent = state.authenticated ? "管理者としてログイン中" : "管理者ログイン";
   adminPanel.classList.toggle("hidden", !state.authenticated);
+  todoForm.classList.toggle("hidden", !state.authenticated);
   document.querySelectorAll(".admin-actions").forEach((element) => {
     element.classList.toggle("hidden", !state.authenticated);
   });
+}
+
+function formatDateOnly(value) {
+  if (!value) return "期限なし";
+  return new Intl.DateTimeFormat("ja-JP", {
+    year: "numeric",
+    month: "short",
+    day: "numeric"
+  }).format(new Date(`${value}T00:00:00`));
 }
 
 function renderSummary() {
@@ -108,8 +131,26 @@ function renderComments(container, comments) {
     const item = document.createElement("div");
     item.className = "comment";
 
+    const header = document.createElement("div");
+    header.className = "comment-header";
+
     const author = document.createElement("strong");
     author.textContent = comment.author;
+
+    header.append(author);
+
+    if (state.authenticated) {
+      const deleteButton = document.createElement("button");
+      deleteButton.className = "comment-delete-button";
+      deleteButton.type = "button";
+      deleteButton.textContent = "削除";
+      deleteButton.addEventListener("click", async () => {
+        if (!confirm("このコメントを削除しますか？")) return;
+        await api(`/api/comments/${comment.id}`, { method: "DELETE" });
+        await loadCompanies();
+      });
+      header.append(deleteButton);
+    }
 
     const body = document.createElement("p");
     body.textContent = comment.body;
@@ -118,7 +159,7 @@ function renderComments(container, comments) {
     time.dateTime = comment.createdAt;
     time.textContent = formatDate(comment.createdAt);
 
-    item.append(author, body, time);
+    item.append(header, body, time);
     container.append(item);
   });
 }
@@ -141,23 +182,40 @@ function renderCompanies() {
     const node = companyTemplate.content.firstElementChild.cloneNode(true);
     const title = node.querySelector("h3");
     const pill = node.querySelector(".status-pill");
+    const desirePill = node.querySelector(".desire-pill");
     const memo = node.querySelector(".memo");
     const adminActions = node.querySelector(".admin-actions");
     const editArea = node.querySelector(".edit-area");
     const editName = node.querySelector(".edit-name");
     const editStatus = node.querySelector(".edit-status");
+    const editDesireLevel = node.querySelector(".edit-desire-level");
+    const editUrl = node.querySelector(".edit-url");
     const editMemo = node.querySelector(".edit-memo");
     const commentForm = node.querySelector(".comment-form");
     const commentList = node.querySelector(".comment-list");
 
-    title.textContent = company.name;
+    title.innerHTML = "";
+    if (company.url) {
+      const link = document.createElement("a");
+      link.href = company.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = company.name;
+      title.append(link);
+    } else {
+      title.textContent = company.name;
+    }
     pill.textContent = company.status;
     pill.dataset.status = company.status;
+    desirePill.textContent = `志望度: ${company.desireLevel || "未設定"}`;
+    desirePill.dataset.desireLevel = company.desireLevel || "未設定";
     memo.textContent = company.memo || "メモは未入力です。";
     adminActions.classList.toggle("hidden", !state.authenticated);
     renderComments(commentList, company.comments || []);
     populateStatusOptions(editStatus, company.status);
+    populateDesireLevelOptions(editDesireLevel, company.desireLevel || "未設定");
     editName.value = company.name;
+    editUrl.value = company.url || "";
     editMemo.value = company.memo || "";
 
     node.querySelector(".edit-button").addEventListener("click", () => {
@@ -168,6 +226,8 @@ function renderCompanies() {
       editArea.classList.add("hidden");
       editName.value = company.name;
       editStatus.value = company.status;
+      editDesireLevel.value = company.desireLevel || "未設定";
+      editUrl.value = company.url || "";
       editMemo.value = company.memo || "";
     });
 
@@ -177,6 +237,8 @@ function renderCompanies() {
         body: JSON.stringify({
           name: editName.value,
           status: editStatus.value,
+          desireLevel: editDesireLevel.value,
+          url: editUrl.value,
           memo: editMemo.value
         })
       });
@@ -207,9 +269,68 @@ function renderCompanies() {
   });
 }
 
+function renderTodos() {
+  todoList.innerHTML = "";
+  if (!state.todos.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "やることはまだ登録されていません。";
+    todoList.append(empty);
+    return;
+  }
+
+  state.todos.forEach((todo) => {
+    const item = document.createElement("article");
+    item.className = `todo-item${todo.done ? " done" : ""}`;
+
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.checked = todo.done;
+    check.disabled = !state.authenticated;
+    check.addEventListener("change", async () => {
+      await api(`/api/todos/${todo.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          title: todo.title,
+          dueDate: todo.dueDate,
+          done: check.checked
+        })
+      });
+      await loadTodos();
+    });
+
+    const text = document.createElement("div");
+    text.className = "todo-text";
+    const title = document.createElement("strong");
+    title.textContent = todo.title;
+    const due = document.createElement("time");
+    due.textContent = formatDateOnly(todo.dueDate);
+    if (todo.dueDate) due.dateTime = todo.dueDate;
+    text.append(title, due);
+
+    item.append(check, text);
+
+    if (state.authenticated) {
+      const deleteButton = document.createElement("button");
+      deleteButton.className = "todo-delete-button";
+      deleteButton.type = "button";
+      deleteButton.textContent = "削除";
+      deleteButton.addEventListener("click", async () => {
+        if (!confirm("このやることを削除しますか？")) return;
+        await api(`/api/todos/${todo.id}`, { method: "DELETE" });
+        await loadTodos();
+      });
+      item.append(deleteButton);
+    }
+
+    todoList.append(item);
+  });
+}
+
 function render() {
   renderSummary();
   renderTabs();
+  renderTodos();
   renderCompanies();
   updateSessionUi();
 }
@@ -223,8 +344,16 @@ async function loadSession() {
 async function loadCompanies() {
   const payload = await api("/api/companies");
   state.statuses = payload.statuses;
+  state.desireLevels = payload.desireLevels || ["未設定", "第一志望", "高", "中", "低"];
   state.companies = payload.companies;
   populateStatusOptions(statusSelect, state.statuses[0]);
+  populateDesireLevelOptions(desireLevelSelect, state.desireLevels[0]);
+  render();
+}
+
+async function loadTodos() {
+  const payload = await api("/api/todos");
+  state.todos = payload.todos;
   render();
 }
 
@@ -271,17 +400,35 @@ companyForm.addEventListener("submit", async (event) => {
     body: JSON.stringify({
       name: formData.get("name"),
       status: formData.get("status"),
+      desireLevel: formData.get("desireLevel"),
+      url: formData.get("url"),
       memo: formData.get("memo")
     })
   });
   companyForm.reset();
   populateStatusOptions(statusSelect, state.statuses[0]);
+  populateDesireLevelOptions(desireLevelSelect, state.desireLevels[0]);
   await loadCompanies();
+});
+
+todoForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const formData = new FormData(todoForm);
+  await api("/api/todos", {
+    method: "POST",
+    body: JSON.stringify({
+      title: formData.get("title"),
+      dueDate: formData.get("dueDate")
+    })
+  });
+  todoForm.reset();
+  await loadTodos();
 });
 
 (async function init() {
   await loadSession();
   await loadCompanies();
+  await loadTodos();
 })().catch((error) => {
   companyGrid.innerHTML = `<div class="empty">${error.message}</div>`;
 });

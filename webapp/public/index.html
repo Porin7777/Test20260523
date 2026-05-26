@@ -60,12 +60,38 @@
             選考状況
             <select name="status" id="statusSelect"></select>
           </label>
+          <label>
+            志望度
+            <select name="desireLevel" id="desireLevelSelect"></select>
+          </label>
+          <label class="wide-field">
+            会社URL
+            <input name="url" placeholder="example.com/recruit" />
+          </label>
           <label class="wide-field">
             メモ
             <textarea name="memo" rows="3" placeholder="次回面接日、準備事項など"></textarea>
           </label>
           <button class="primary-button" type="submit">追加する</button>
         </form>
+      </section>
+
+      <section class="todo-section" aria-label="やることリスト">
+        <div class="section-heading">
+          <h2>やることリスト</h2>
+        </div>
+        <form id="todoForm" class="todo-form hidden">
+          <label>
+            やること
+            <input name="title" placeholder="例: 志望動機を見直す" required />
+          </label>
+          <label>
+            期限
+            <input name="dueDate" type="date" />
+          </label>
+          <button class="primary-button" type="submit">追加する</button>
+        </form>
+        <div class="todo-list" id="todoList"></div>
       </section>
 
       <section class="progress-section" aria-label="進捗票">
@@ -81,7 +107,10 @@
       <article class="company-card">
         <div class="company-header">
           <div>
-            <span class="status-pill"></span>
+            <div class="pill-row">
+              <span class="status-pill"></span>
+              <span class="desire-pill"></span>
+            </div>
             <h3></h3>
           </div>
           <div class="admin-actions hidden">
@@ -98,6 +127,14 @@
           <label>
             選考状況
             <select class="edit-status"></select>
+          </label>
+          <label>
+            志望度
+            <select class="edit-desire-level"></select>
+          </label>
+          <label>
+            会社URL
+            <input class="edit-url" placeholder="example.com/recruit" />
           </label>
           <label>
             メモ

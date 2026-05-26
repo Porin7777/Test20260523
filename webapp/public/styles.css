@@ -108,6 +108,7 @@ h2 {
 
 .auth-panel,
 .admin-panel,
+.todo-section,
 .progress-section {
   margin-top: 22px;
 }
@@ -130,11 +131,21 @@ h2 {
 }
 
 .login-form,
-.company-form {
+.company-form,
+.todo-form {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
   align-items: end;
+}
+
+.todo-form {
+  grid-template-columns: minmax(220px, 1fr) 180px auto;
+  margin-bottom: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
 }
 
 label {
@@ -241,6 +252,61 @@ button:hover {
   gap: 16px;
 }
 
+.todo-list {
+  display: grid;
+  gap: 10px;
+}
+
+.todo-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.todo-item input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+}
+
+.todo-text {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.todo-text strong {
+  overflow-wrap: anywhere;
+}
+
+.todo-text time {
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.todo-item.done .todo-text strong {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.todo-delete-button {
+  min-height: 34px;
+  border: 0;
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: #f9e8e5;
+  color: #9f2d21;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
 .company-card {
   min-width: 0;
   padding: 18px;
@@ -263,7 +329,21 @@ button:hover {
   font-size: 1.2rem;
 }
 
-.status-pill {
+.company-header h3 a {
+  color: var(--brand-strong);
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
+.pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.status-pill,
+.desire-pill {
   display: inline-flex;
   align-items: center;
   min-height: 28px;
@@ -273,6 +353,21 @@ button:hover {
   color: var(--warning);
   font-size: 0.78rem;
   font-weight: 800;
+}
+
+.desire-pill {
+  background: #e6eff8;
+  color: #245071;
+}
+
+.desire-pill[data-desire-level="第一志望"] {
+  background: #fde8e1;
+  color: #9f2d21;
+}
+
+.desire-pill[data-desire-level="高"] {
+  background: #fff1d7;
+  color: #89520d;
 }
 
 .status-pill[data-status="内定"] {
@@ -347,9 +442,30 @@ button:hover {
   background: #f6f8fb;
 }
 
+.comment-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
 .comment strong {
   display: block;
-  margin-bottom: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.comment-delete-button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 8px;
+  padding: 5px 9px;
+  background: #f9e8e5;
+  color: #9f2d21;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 800;
 }
 
 .comment p {
@@ -387,7 +503,8 @@ button:hover {
 
   .summary-band,
   .login-form,
-  .company-form {
+  .company-form,
+  .todo-form {
     grid-template-columns: 1fr;
   }
 
